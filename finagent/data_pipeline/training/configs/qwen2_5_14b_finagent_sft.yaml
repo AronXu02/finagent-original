@@ -1,0 +1,64 @@
+### model
+model_name_or_path: Qwen/Qwen2.5-14B-Instruct
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target: all
+additional_target: embed_tokens,lm_head
+
+### dataset
+dataset: finagent_tool_calling_30k
+dataset_dir: data/finagent
+template: qwen
+cutoff_len: 2048
+overwrite_cache: true
+preprocessing_num_workers: 16
+val_size: 0.05
+
+### packing
+packing: true
+neat_packing: true
+
+### output
+output_dir: saves/qwen2.5-14b/lora/finagent-sft
+logging_steps: 10
+save_steps: 200
+plot_loss: true
+report_to: wandb
+run_name: finagent-14b-sft-v1
+
+### train
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 5.0e-5
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+flash_attn: fa2
+ddp_timeout: 180000000
+gradient_checkpointing: true
+gradient_clipping: 1.0
+max_grad_norm: 1.0
+
+### deepspeed
+deepspeed: finagent/data_pipeline/training/configs/ds_z2_config.json
+
+### eval
+do_eval: true
+eval_steps: 200
+per_device_eval_batch_size: 4
+evaluation_strategy: steps
+eval_accumulation_steps: 1
+metric_for_best_model: eval_loss
+load_best_model_at_end: true
+
+### generation
+predict_with_generate: false
+

@@ -1,0 +1,203 @@
+x-finagent-app: &finagent-app
+  image: finagent-app:local
+  build:
+    context: ../../..
+    dockerfile: finagent/infra/docker/Dockerfile
+  env_file:
+    - ./production.env.example
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: finagent
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: finagent
+    ports:
+      - "5432:5432"
+    volumes:
+      - finagent-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finagent -d finagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/change-me
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - finagent-neo4j-data:/data
+      - finagent-neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p change-me 'RETURN 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    command:
+      - etcd
+      - --advertise-client-urls=http://127.0.0.1:2379
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --data-dir=/etcd
+    volumes:
+      - finagent-etcd-data:/etcd
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: minio server /minio_data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - finagent-minio-data:/minio_data
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - finagent-milvus-data:/var/lib/milvus
+    depends_on:
+      - etcd
+      - minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  temporal:
+    image: temporalio/auto-setup:1.27.2
+    profiles:
+      - temporal
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: finagent
+      POSTGRES_PWD: change-me
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./temporal-dynamicconfig:/etc/temporal/config/dynamicconfig
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  migrate:
+    <<: *finagent-app
+    command:
+      - python
+      - -m
+      - finagent.scripts.apply_migrations
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+
+  market-data-gateway:
+    <<: *finagent-app
+    command:
+      - uvicorn
+      - finagent.apps.gateways.postgres_http:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    ports:
+      - "8081:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  rag-gateway:
+    <<: *finagent-app
+    command:
+      - uvicorn
+      - finagent.apps.gateways.postgres_http:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    ports:
+      - "8082:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api:
+    <<: *finagent-app
+    profiles:
+      - docker-app
+    ports:
+      - "8002:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      milvus:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      market-data-gateway:
+        condition: service_started
+      rag-gateway:
+        condition: service_started
+
+  worker:
+    <<: *finagent-app
+    profiles:
+      - docker-worker
+    command:
+      - python
+      - -m
+      - finagent.apps.worker.main
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      milvus:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      market-data-gateway:
+        condition: service_started
+      rag-gateway:
+        condition: service_started
+
+volumes:
+  finagent-postgres-data:
+  finagent-neo4j-data:
+  finagent-neo4j-logs:
+  finagent-etcd-data:
+  finagent-minio-data:
+  finagent-milvus-data:
